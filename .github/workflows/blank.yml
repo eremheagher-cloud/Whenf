@@ -1,0 +1,266 @@
+
+name: PC criado pelo @alves7.pcm
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_number:
+        description: "Instance Number (1-10)"
+        required: true
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: System Information
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host "=== INFORMACOES DO WINDOWS ==="
+          Write-Host "Usuario pretendido: rafael"
+          Write-Host "Nome pretendido do PC: Eva"
+          Write-Host "Identificador: rafael37464"
+          Write-Host "Instancia: ${{ inputs.instance_number }}"
+
+          Get-ComputerInfo |
+            Select-Object WindowsProductName, WindowsVersion, OsArchitecture |
+            Format-List
+
+          Get-CimInstance Win32_ComputerSystem |
+            Select-Object Name, TotalPhysicalMemory |
+            Format-List
+
+          Get-CimInstance Win32_Processor |
+            Select-Object Name, NumberOfCores, NumberOfLogicalProcessors |
+            Format-List
+
+          Get-PSDrive -PSProvider FileSystem |
+            Select-Object Name, Used, Free |
+            Format-Table -AutoSize
+
+      - name: Check RDP Configuration
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $RdpPath = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
+
+          if (Test-Path $RdpPath) {
+            $RdpStatus = Get-ItemProperty `
+              -Path $RdpPath `
+              -Name fDenyTSConnections
+
+            if ($RdpStatus.fDenyTSConnections -eq 0) {
+              Write-Host "RDP habilitado na configuracao."
+            }
+            else {
+              Write-Host "RDP desabilitado na configuracao."
+            }
+          }
+          else {
+            Write-Host "Configuracao RDP nao encontrada."
+          }
+
+          Write-Host "Esta etapa verifica a configuracao existente."
+
+      - name: Create User and Generate Access Code
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $Username = 'rafael'
+          $Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+          $CodeBytes = New-Object byte[] 16
+          $PasswordBytes = New-Object byte[] 24
+          $SecurePassword = $null
+          $GeneratedPassword = $null
+
+          try {
+            # Gerar identificador aleatorio
+            $Rng.GetBytes($CodeBytes)
+            $AccessCode = [Convert]::ToHexString($CodeBytes)
+
+            # Gerar senha compativel com PowerShell 7
+            $Rng.GetBytes($PasswordBytes)
+            $PasswordText = [Convert]::ToBase64String($PasswordBytes)
+            $GeneratedPassword = 'Ra@' + $PasswordText.Substring(0, 20) + '7!'
+
+            $SecurePassword = ConvertTo-SecureString `
+              -String $GeneratedPassword `
+              -AsPlainText `
+              -Force
+
+            $User = Get-LocalUser `
+              -Name $Username `
+              -ErrorAction SilentlyContinue
+
+            if ($null -eq $User) {
+              New-LocalUser `
+                -Name $Username `
+                -Password $SecurePassword `
+                -Description 'Conta local rafael' |
+                Out-Null
+
+              Write-Host "Conta local criada."
+            }
+            else {
+              Set-LocalUser `
+                -Name $Username `
+                -Password $SecurePassword
+
+              Write-Host "Senha da conta local atualizada."
+            }
+
+            # Exibir dados no log da execucao
+            Write-Host ""
+            Write-Host "========== DADOS GERADOS =========="
+            Write-Host "Nome pretendido do PC: Eva"
+            Write-Host "Usuario: $Username"
+            Write-Host "Codigo aleatorio: $AccessCode"
+            Write-Host "Senha: $GeneratedPassword"
+            Write-Host "==================================="
+            Write-Host ""
+
+            Write-Host "ATENCAO: o codigo aleatorio nao e um codigo RDP."
+            Write-Host "Proteja os logs: eles contem a senha."
+
+            # Tambem gravar no resumo da execucao
+            @(
+              '## Dados gerados'
+              ''
+              '- Nome pretendido do PC: Eva'
+              "- Usuario: $Username"
+              "- Codigo aleatorio: $AccessCode"
+              "- Senha: $GeneratedPassword"
+              ''
+              'O codigo e apenas um identificador; nao cria uma conexao remota.'
+            ) | Out-File `
+              -FilePath $env:GITHUB_STEP_SUMMARY `
+              -Append `
+              -Encoding utf8
+          }
+          finally {
+            $SecurePassword = $null
+            $GeneratedPassword = $null
+            $Rng.Dispose()
+            [Array]::Clear($CodeBytes, 0, $CodeBytes.Length)
+            [Array]::Clear($PasswordBytes, 0, $PasswordBytes.Length)
+          }
+
+      - name: Check Tailscale
+        shell: pwsh
+        run: |
+          $TsExe = 'C:\Program Files\Tailscale\tailscale.exe'
+
+          if (Test-Path $TsExe) {
+            Write-Host "Tailscale instalado."
+            & $TsExe status
+
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Tailscale nao esta conectado ou autenticado."
+            }
+          }
+          else {
+            Write-Host "Tailscale nao instalado."
+          }
+
+          Write-Host "Esta verificacao nao estabelece uma conexao remota."
+
+      - name: Install Google Chrome
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Url = 'https://dl.google.com/chrome/install/latest/chrome_installer.exe'
+          $Installer = Join-Path $env:TEMP 'chrome_installer.exe'
+
+          try {
+            Invoke-WebRequest -Uri $Url -OutFile $Installer
+
+            $Process = Start-Process `
+              -FilePath $Installer `
+              -ArgumentList '/silent /install' `
+              -Wait `
+              -PassThru
+
+            if ($Process.ExitCode -notin @(0, 3010)) {
+              throw "Falha na instalacao do Chrome: $($Process.ExitCode)"
+            }
+
+            Write-Host "Google Chrome instalado."
+          }
+          finally {
+            if (Test-Path $Installer) {
+              Remove-Item $Installer -Force
+            }
+          }
+
+      - name: Install 7-Zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Url = 'https://www.7-zip.org/a/7z2409-x64.exe'
+          $Installer = Join-Path $env:TEMP '7z-installer.exe'
+
+          try {
+            Invoke-WebRequest -Uri $Url -OutFile $Installer
+
+            $Process = Start-Process `
+              -FilePath $Installer `
+              -ArgumentList '/S' `
+              -Wait `
+              -PassThru
+
+            if ($Process.ExitCode -notin @(0, 3010)) {
+              throw "Falha na instalacao do 7-Zip: $($Process.ExitCode)"
+            }
+
+            Write-Host "7-Zip instalado."
+          }
+          finally {
+            if (Test-Path $Installer) {
+              Remove-Item $Installer -Force
+            }
+          }
+
+      - name: Final Status
+        shell: pwsh
+        run: |
+          Write-Host "=== STATUS FINAL ==="
+          Write-Host "Usuario: rafael"
+          Write-Host "Nome pretendido do PC: Eva"
+          Write-Host "Identificador: rafael37464"
+          Write-Host "Instancia: ${{ inputs.instance_number }}"
+          Write-Host "Runner: $env:RUNNER_NAME"
+          Write-Host "Veja os dados gerados na etapa Create User and Generate Access Code."
+
+      - name: Keep Session Alive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Deadline = [DateTimeOffset]::UtcNow.AddMinutes(20)
+
+          Write-Host "Mantendo a execucao ativa..."
+
+          while ([DateTimeOffset]::UtcNow -lt $Deadline) {
+            $Remaining = ($Deadline - [DateTimeOffset]::UtcNow).TotalSeconds
+
+            if ($Remaining -le 0) {
+              break
+            }
+
+            Write-Host "Execucao ativa: $(Get-Date -Format 'HH:mm:ss')"
+            Start-Sleep -Seconds ([Math]::Min(30, [Math]::Ceiling($Remaining)))
+          }
+
+          Write-Host "Etapa de espera concluida."
+          
